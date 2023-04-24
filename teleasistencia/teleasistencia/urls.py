@@ -25,6 +25,9 @@ from django.conf.urls.static import static
 from rest_framework import routers
 from teleasistenciaApp.rest_django import views_rest
 
+# Para recuperación de contraseñas
+from .views import get_csrf_token
+
 #Autenticación rest con JWT:
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
@@ -61,6 +64,7 @@ router.register(r'paciente', views_rest.Paciente_ViewSet)
 router.register(r'tipo_modalidad_paciente', views_rest.Tipo_Modalidad_Paciente_ViewSet)
 router.register(r'recursos_comunitarios_en_alarma', views_rest.Recursos_Comunitarios_En_Alarma_ViewSet)
 router.register(r'alarma', views_rest.Alarma_ViewSet)
+router.register(r'alarma_programada', views_rest.Alarma_Programada_ViewSet)
 router.register(r'dispositivos_auxiliares_en_terminal', views_rest.Dispositivos_Auxiliares_en_Terminal_ViewSet)
 router.register(r'persona_contacto_en_alarma', views_rest.Persona_Contacto_En_Alarma_ViewSet)
 router.register(r'gestion_base_datos', views_rest.Gestion_Base_Datos_ViewSet)
@@ -85,6 +89,18 @@ urlpatterns = [
     #Django Rest Simple JWT:
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
+    # URLs de recuperación de contraseñas de usuarios de Django (desde navegador)
+    path('api-rest/password_reset/csrf', get_csrf_token, name='password_reset_csrf'),
+    # [password_reset_form.html] Aqui se hace la petición, enviando el correo que algún usuario (User) + token csrf)
+    path('api-rest/password_reset/', views.PasswordResetView.as_view(), name='password_reset'),
+    # [password_reset_done.html] Después del post, te redirige aquí para que sepas que la petición se ha gestionado
+    path('api-rest/password_reset/done/', views.PasswordResetDoneView.as_view(), name='password_reset_done'),
+    # [password_reset_confirm.html] A donde te manda el link recibido por correo
+    path('api-rest/reset/<uidb64>/<token>/', views.PasswordResetConfirmView.as_view(), name='password_reset_confirm'),
+    # [password_reset_complete.html] Ventana de confirmación de cambio de contraseña
+    path('api-rest/reset/done/', views.PasswordResetCompleteView.as_view(), name='password_reset_complete'),
 ]
 # añadimos el media url y el media root para poder visualizar las imagenes de usuario
 urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
