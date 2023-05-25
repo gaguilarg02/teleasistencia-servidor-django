@@ -1,13 +1,21 @@
+import os
 from django.db import models
 from model_utils import Choices
 from django.utils.timezone import now
 from django.contrib.auth.models import User
 from django.contrib.auth.models import AbstractUser
+from django.conf import settings
 
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 
 from utilidad.logging import info, error, blue
+
+# Para tratamiento de imagenes
+from io import BytesIO
+from PIL import Image
+from django.core.files import File
+from django.core.files.base import ContentFile
 
 # Create your models here.
 
@@ -55,13 +63,69 @@ class Logs_ConexionesUsuarios(models.Model):
         )
 
 
-# timestamp: The time when the event occurred.
-
 # Creamos la clase imagen con los atributos usuario e imagen
 class Imagen_User(models.Model):
-   user = models.OneToOneField(User, on_delete=models.CASCADE)
-   imagen = models.ImageField(upload_to='imagen_usuario', null=True, blank=True, default="")
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    imagen = models.ImageField(upload_to='imagen_usuario', null=True, blank=True, default="")
 
+    def save(self, *args, **kwargs):
+        # Si se ha actualizado (no nueva), borrar la imagen vieja.
+        instancia_vieja = Imagen_User.objects.filter(pk=self.pk).first()
+        if instancia_vieja and instancia_vieja.imagen != self.imagen:
+            if os.path.exists(instancia_vieja.imagen.path):
+                os.remove(instancia_vieja.imagen.path)
+
+        # Intentamos minificar la imagen
+        try:
+            self._minificar()
+        except Exception as e:
+            error(f"Fallo al intentar minificar imagen: {e}")
+
+        # Dejamos que django termine de persistir el modelo
+        super(Imagen_User, self).save(*args, **kwargs)
+
+    def _minificar(self):
+        """
+        Minifica la imagen para ahorrar espacio y aligerar la carga del servidor
+        """
+        if self.imagen:
+            # Sacar ajustes de calidad de imagen
+            size = settings.MINIFICATION_SIZE
+            quality = settings.MINIFICATION_QUALITY
+
+            # Abrimos la imagen con Pillow, pasamos a RGB (para JPEG) y minificamos
+            # Lo abrimos con un ContentFile, porque el fichero está en memoria y no en disco
+            img = Image.open(ContentFile(self.imagen.read())).convert('RGB')
+            img.thumbnail(size)
+
+            # Creamos un buffer donde escribir la imagen transformada
+            img_bytes = BytesIO()
+            img.save(img_bytes, format='JPEG', quality=quality, optimize=True)
+            img_bytes.seek(0)  # Mover el cursor al principio
+
+            # Guardamos el buffer a un fichero
+            filename = f"{self.user.username}.jpg"
+            self.imagen.save(filename, File(img_bytes, name=filename), save=False)
+
+
+# Creamos la clase que almacena la relación entre el usuario y la base de datos a la que pertenece
+class Database(models.Model):
+    nameDescritive = models.CharField(max_length=200)
+    engine = models.CharField(max_length=200)
+    name = models.CharField(max_length=200)
+    user = models.CharField(max_length=100, blank=True, null=True)
+    password = models.CharField(max_length=200, blank=True, null=True)
+    host = models.CharField(max_length=200, blank=True, null=True)
+    port = models.IntegerField(blank=True, null=True)
+    def __str__(self):
+        return self.nameDescritive+": "+self.name+" - "+self.engine
+
+class Database_User(models.Model):
+   user = models.OneToOneField(User, on_delete=models.CASCADE)
+   database = models.ForeignKey(Database, on_delete=models.CASCADE)
+
+   def __str__(self):
+        return self.database.nameDescritive+": "+self.user.username+" - "+self.database.name
 
 class Tipo_Agenda(models.Model):
     nombre = models.CharField(max_length=200)
@@ -165,6 +229,7 @@ class Relacion_Paciente_Persona(models.Model):
     observaciones = models.CharField(max_length=4000, blank=True)
     prioridad = models.IntegerField( blank=True)
     es_conviviente= models.BooleanField(default=False)
+    tiempo_domicilio = models.IntegerField(default=1)
     def __str__(self):
         if self.id_paciente and self.id_paciente.id_persona:
             return "Paciente: "+self.id_paciente.id_persona.nombre+" - Contacto: "+self.nombre+" "+self.apellidos
@@ -177,6 +242,11 @@ class Tipo_Vivienda(models.Model):
     def __str__(self):
         return self.nombre
 
+class Tipo_Situacion(models.Model):
+    nombre = models.CharField(max_length=200)
+    def __str__(self):
+        return self.nombre
+
 class Terminal(models.Model):
     numero_terminal = models.CharField(max_length=30, null=False)
     id_titular = models.ForeignKey(Paciente, null=True, on_delete=models.PROTECT, blank=True)
@@ -184,6 +254,8 @@ class Terminal(models.Model):
     modo_acceso_vivienda = models.CharField(max_length=400)
     barreras_arquitectonicas = models.CharField(max_length=5000, blank=True)
     modelo_terminal = models.CharField(max_length=400, blank=True)
+    id_tipo_situacion = models.ForeignKey(Tipo_Situacion, null=True, on_delete=models.SET_NULL)
+    fecha_tipo_situacion = models.DateField(null=True, default=now)
     def __str__(self):
         if self.id_titular:
             return self.numero_terminal+" - "+self.id_titular.id_persona.nombre
@@ -244,19 +316,22 @@ class Alarma(models.Model):
             return self.id_tipo_alarma.nombre + " - " + self.estado_alarma + " - " + str(self.fecha_registro)
         else:
             return self.estado_alarma+ " - " + str(self.fecha_registro)
-        
+
     def save(self, *args, **kwargs):
         # Si no tiene asignada una cave primaria, es una nueva instancia
-        if not self.pk:
-            # Notificar a los clientes
-            self.notify('new_alarm')
+        is_new = self.pk is None
 
         # Ejecutar el resto del código original
         super(Alarma, self).save(*args, **kwargs)
-        
+
+        # Si es nuevo, notificar
+        if is_new:
+            # Notificar a los clientes
+            self.notify('new_alarm')
+
     def notify(self, accion):
         from .rest_django.serializers import Alarma_Serializer
-        
+
         alarma_serializer = Alarma_Serializer(self)
         channel_layer = get_channel_layer()
         async_to_sync(channel_layer.group_send)(
@@ -314,28 +389,6 @@ class Recursos_Comunitarios_En_Alarma(models.Model):
             return self.id_alarma.estado_alarma + " - " + str(
                 self.id_alarma.fecha_registro) + " - " +" - " + str(self.fecha_registro)
 
-
-class Tipo_Situacion(models.Model):
-    nombre = models.CharField(max_length=200)
-    def __str__(self):
-        return self.nombre
-
-class Historico_Tipo_Situacion(models.Model):
-    id_tipo_situacion = models.ForeignKey(Tipo_Situacion, null=True, on_delete=models.SET_NULL)
-    id_terminal = models.ForeignKey(Terminal, null=True, on_delete=models.SET_NULL)
-    fecha = models.DateField(null=False, default=now)
-    def __str__(self):
-        if self.id_tipo_situacion and self.id_terminal and self.id_terminal.id_titular:
-            return self.id_tipo_situacion.nombre+" - "+self.id_terminal.numero_terminal+" - "+self.id_terminal.id_titular.id_persona.nombre + " - "+str(self.fecha)
-        elif self.id_tipo_situacion and self.id_terminal:
-            return self.id_tipo_situacion.nombre+" - "+self.id_terminal.numero_terminal+ " - "+str(self.fecha)
-        elif self.id_tipo_situacion:
-            return self.id_tipo_situacion.nombre+ " - "+str(self.fecha)
-        elif self.id_terminal and self.id_terminal.id_titular:
-            return self.id_terminal.numero_terminal+" - "+self.id_terminal.id_titular.id_persona.nombre+ " - "+str(self.fecha)
-        elif self.id_terminal:
-            return self.id_terminal.numero_terminal+ " - "+str(self.fecha)
-
 class Gestion_Base_Datos(models.Model):
     ubicacion_copia = models.CharField(max_length=200, default='/Server/teleasistencia/backup')
     fecha_copia = models.DateField(null=False, default=now)
@@ -366,8 +419,6 @@ class Tecnologia(models.Model):
 class Desarrollador_Tecnologia(models.Model):
     # Related name nos permite obtener los datos relacionados desde la entidad a la que hace referencia
     id_desarrollador = models.ForeignKey(Desarrollador, null=True, on_delete=models.SET_NULL, related_name='desarrollador_tecnologias')
-    id_tecnologia = models.ForeignKey(Tecnologia, null=True, on_delete=models.SET_NULL, related_name='tecnologias')
+    id_tecnologia = models.ForeignKey(Tecnologia, null=True, on_delete=models.SET_NULL)
     def __str__(self):
         return self.id_desarrollador.nombre+ " - "+self.id_tecnologia.nombre
-
-
